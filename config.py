@@ -61,6 +61,11 @@ ERROR_FARE_WORDS = [
 # ERROR_FARE_MENTION environment variable.
 ERROR_FARE_MENTION = "@everyone"
 
+# Price memory: every LAX -> Japan price the bot sees goes into prices.json,
+# and each alert says how it compares ("$80 above the best in 12 months").
+PRICE_MEMORY_DAYS = 365   # how far back "the best" looks
+PRICE_RECENT_DAYS = 60    # for the "lowest in 60 days" badge
+
 # Forget deals older than this so seen.json stays small.
 SEEN_RETENTION_DAYS = 60
 

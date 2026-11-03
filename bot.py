@@ -154,18 +154,10 @@ def format_months(months: list[tuple[int, int]]) -> str:
     return ", ".join(label(r[0]) if len(r) == 1 else f"{label(r[0])} – {label(r[-1])}" for r in runs)
 
 
-def classify(title: str, summary: str = "", today: date | None = None) -> dict | None:
-    """Return alert details if this post is a deal we care about, else None.
-
-    `summary` can be the post's full HTML; it's used for the destination,
-    origin, error-fare wording and travel dates.
-    """
+def parse_route(title: str, summary: str = "") -> dict | None:
+    """If the post is an LAX -> Japan fare, return its dests, USD price and trip type."""
     title = strip_html(title)
     summary = strip_html(summary)
-
-    # 0. Skip deals the site has already marked as dead.
-    if EXPIRED_RX.search(title):
-        return None
 
     # 1. Destination: named in the title, or the title says "Japan" and the
     #    body names Tokyo/Osaka/etc.
@@ -194,6 +186,27 @@ def classify(title: str, summary: str = "", today: date | None = None) -> dict |
         prices = [int(p.replace(",", "")) for p in PRICE_RX.findall(title)]
         price = min(prices) if prices else None
     trip = "oneway" if ONEWAY_RX.search(title) else "roundtrip"
+    return {"dests": dests, "price": price, "trip": trip}
+
+
+def classify(title: str, summary: str = "", today: date | None = None) -> dict | None:
+    """Return alert details if this post is a deal we care about, else None.
+
+    `summary` can be the post's full HTML; it's used for the destination,
+    origin, error-fare wording and travel dates.
+    """
+    title = strip_html(title)
+    summary = strip_html(summary)
+
+    # 0. Skip deals the site has already marked as dead.
+    if EXPIRED_RX.search(title):
+        return None
+
+    # 1-3. Route, price and trip type.
+    route = parse_route(title, summary)
+    if not route:
+        return None
+    dests, price, trip = route["dests"], route["price"], route["trip"]
     is_error = bool(ERROR_RX.search(title) or ERROR_RX.search(summary))
 
     # 4. Tier.
@@ -230,8 +243,14 @@ def fetch_feed(name: str, url: str) -> list:
         print(f"[warn] {name}: could not fetch feed ({exc})", file=sys.stderr)
         return []
     parsed = feedparser.parse(resp.content)
-    if parsed.bozo and not parsed.entries:
-        print(f"[warn] {name}: response wasn't a readable RSS feed", file=sys.stderr)
+    if not parsed.entries and (parsed.bozo or not parsed.version):
+        # Say what came back instead, e.g. a "Just a moment..." bot-check page.
+        page_title = re.search(rb"<title[^>]*>(.*?)</title>", resp.content[:5000], re.I | re.S)
+        what = strip_html(page_title.group(1).decode("utf-8", "replace"))[:80] if page_title else ""
+        print(f"[warn] {name}: response wasn't a readable RSS feed "
+              f"(HTTP {resp.status_code}, {resp.headers.get('Content-Type', '?')}, "
+              f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})",
+              file=sys.stderr)
     return parsed.entries
 
 
@@ -244,6 +263,76 @@ def entry_time(entry) -> str | None:
     if not t:
         return None
     return datetime(*t[:6], tzinfo=timezone.utc).isoformat()
+
+
+# ----------------------------------------------------------- price history --
+
+PRICES_FILE = Path(__file__).with_name("prices.json")
+
+
+def load_prices() -> list[dict]:
+    if not PRICES_FILE.exists():
+        return []
+    try:
+        return json.loads(PRICES_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        print("[warn] prices.json was unreadable; starting price history fresh", file=sys.stderr)
+        return []
+
+
+def save_prices(records: list[dict]) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=config.PRICE_MEMORY_DAYS)
+    kept = [r for r in records if datetime.fromisoformat(r["date"]) >= cutoff]
+    kept.sort(key=lambda r: r["date"])
+    PRICES_FILE.write_text(json.dumps(kept, indent=1) + "\n")
+
+
+def _short_date(d: datetime, now: datetime) -> str:
+    return f"{d:%b} {d.day}" + ("" if d.year == now.year else f", {d.year}")
+
+
+def price_note(price: int, trip: str, records: list[dict], key: str, now: datetime) -> str:
+    """How this price compares with every earlier LAX -> Japan price seen."""
+    trip_label = "one-way" if trip == "oneway" else "round-trip"
+    past = [r for r in records if r["trip"] == trip and r["key"] != key]
+    if not past:
+        return f"First {trip_label} price the bot has tracked, so nothing to compare yet."
+
+    oldest = min(datetime.fromisoformat(r["date"]) for r in past)
+    span = (now - oldest).days
+    window = (f"in {config.PRICE_MEMORY_DAYS // 30} months" if span >= config.PRICE_MEMORY_DAYS - 5
+              else f"since tracking began ({_short_date(oldest, now)})")
+    best = min(past, key=lambda r: (r["price"], r["date"]))
+    best_txt = f"${best['price']:,} on {_short_date(datetime.fromisoformat(best['date']), now)}"
+    n = f"{len(past)} {trip_label} deal{'s' if len(past) != 1 else ''} tracked"
+
+    if price < best["price"]:
+        return f"🏆 **Lowest {trip_label} price {window}** (previous best {best_txt}) · {n}"
+    if price == best["price"]:
+        return f"🏆 **Ties the lowest {trip_label} price {window}** ({best_txt}) · {n}"
+
+    line = f"${price - best['price']:,} above the best {window} ({best_txt}) · {n}"
+    recent_days = config.PRICE_RECENT_DAYS
+    recent = [r["price"] for r in past
+              if now - datetime.fromisoformat(r["date"]) <= timedelta(days=recent_days)]
+    if span >= recent_days and recent and price <= min(recent):
+        line = f"📉 **Lowest in {recent_days} days** · " + line
+    return line
+
+
+def record_price(records: list[dict], known: set[str], key: str, entry, route: dict | None,
+                 now: datetime) -> None:
+    if not route or route["price"] is None or key in known:
+        return
+    records.append({
+        "key": key,
+        "date": now.isoformat(),
+        "price": route["price"],
+        "trip": route["trip"],
+        "dests": route["dests"],
+        "title": strip_html(entry.get("title", ""))[:200],
+    })
+    known.add(key)
 
 
 # ----------------------------------------------------------------- booking --
@@ -352,6 +441,8 @@ def build_message(entry, source: str, info: dict) -> dict:
             {"name": "Route", "value": "LAX → " + ", ".join(info["dests"]), "inline": True},
             {"name": "Price", "value": price, "inline": True},
             {"name": "Source", "value": source, "inline": True},
+            *([{"name": "📊 Price history", "value": info["history"], "inline": False}]
+              if info.get("history") else []),
             {"name": "🗓️ Travel dates",
              "value": format_months(info["months"]) if info.get("months") else "Not listed, check the post",
              "inline": False},
@@ -409,22 +500,35 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
     seen = load_seen()
     first_run = seen is None
     seen = seen or {}
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     posted = matched = 0
+    prices = load_prices()
+    known_prices = {r["key"] for r in prices}
 
     for source, url in config.FEEDS.items():
         entries = fetch_feed(source, url)
         print(f"{source}: {len(entries)} posts in feed")
         for entry in entries:
             key = entry_key(entry)
+            body = entry_html(entry)
+            route = parse_route(entry.get("title", ""), body)
             if not dry_run and key in seen:
+                record_price(prices, known_prices, key, entry, route, now_dt)
                 continue
-            info = classify(entry.get("title", ""), entry_html(entry))
+            info = classify(entry.get("title", ""), body)
+            if info and info["price"] is not None:
+                info["history"] = price_note(info["price"], info["trip"], prices, key, now_dt)
+            # Remember every LAX -> Japan price (even ones too pricey to post)
+            # so later alerts have something to compare against.
+            record_price(prices, known_prices, key, entry, route, now_dt)
             if info:
                 matched += 1
                 label = f"[{info['tier']}] {strip_html(entry.get('title', ''))}"
                 if info["months"]:
                     label += f"  ({format_months(info['months'])})"
+                if info.get("history"):
+                    label += f"\n      {info['history']}"
                 if dry_run:
                     print("  would post:", label)
                 elif first_run and not post_existing:
@@ -439,6 +543,7 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
         print(f"Dry run: {matched} matching deal(s); nothing posted or saved.")
         return
     save_seen(seen)
+    save_prices(prices)
     if first_run and not post_existing:
         print("First run: remembered current posts; only new deals will be posted from now on.")
     print(f"Done: {posted} posted.")
@@ -454,6 +559,7 @@ def send_test(webhook: str) -> None:
                               'Google Flights</a>'}],
     }
     info = classify(entry["title"], entry["summary"], today=date(2026, 11, 1))
+    info["history"] = "🏆 **Lowest round-trip price in 12 months** (previous best $389 on Mar 3) · 41 round-trip deals tracked (sample)"
     post_to_discord(webhook, build_message(entry, "Test", info))
     print("Test alert sent. Check your Discord channel.")
 

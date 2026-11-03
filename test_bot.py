@@ -1,7 +1,7 @@
 """Run with:  python -m pytest -q   (or just: python test_bot.py)"""
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
-from bot import build_message, classify, find_booking_links, format_months, google_flights_url, travel_months
+from bot import build_message, classify, price_note, find_booking_links, format_months, google_flights_url, travel_months
 
 NOV = date(2026, 11, 2)
 
@@ -151,6 +151,43 @@ def test_november_only_deal_skipped():
 
 def test_no_dates_still_posts():
     assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip", "", NOV)["months"] == []
+
+
+NOW = datetime(2026, 11, 2, tzinfo=timezone.utc)
+
+
+def rec(price, days_ago, trip="roundtrip", key=None):
+    return {"key": key or f"k{price}-{days_ago}", "price": price, "trip": trip,
+            "date": (NOW - timedelta(days=days_ago)).isoformat()}
+
+
+def test_price_note_no_history():
+    assert "nothing to compare" in price_note(499, "roundtrip", [], "new", NOW)
+
+
+def test_price_note_new_low_over_full_year():
+    note = price_note(399, "roundtrip", [rec(450, 300), rec(520, 370)], "new", NOW)
+    assert "Lowest round-trip price in 12 months" in note and "$450 on Jan 6" in note
+
+
+def test_price_note_short_history_says_so():
+    note = price_note(399, "roundtrip", [rec(450, 20)], "new", NOW)
+    assert "since tracking began (Oct 13)" in note
+
+
+def test_price_note_above_best_and_lowest_recent():
+    note = price_note(530, "roundtrip", [rec(450, 200), rec(600, 30), rec(560, 10)], "new", NOW)
+    assert note.startswith("📉 **Lowest in 60 days**") and "$80 above the best" in note
+
+
+def test_price_note_above_best_only():
+    note = price_note(620, "roundtrip", [rec(450, 200), rec(600, 30)], "new", NOW)
+    assert note.startswith("$170 above the best") and "Lowest in 60" not in note
+
+
+def test_price_note_ignores_other_trip_type_and_itself():
+    records = [rec(250, 100, trip="oneway"), rec(499, 0, key="same")]
+    assert "nothing to compare" in price_note(499, "roundtrip", records, "same", NOW)
 
 
 if __name__ == "__main__":

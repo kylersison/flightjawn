@@ -1,0 +1,41 @@
+name: deal-alerts
+
+on:
+  schedule:
+    # Every 10 minutes (UTC). For a private repo, use "*/30 * * * *" to stay
+    # inside the free monthly Actions minutes.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: # lets you click "Run workflow" by hand
+
+permissions:
+  contents: write # needed to save seen.json back to the repo
+
+concurrency:
+  group: deal-alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Check feeds and post deals
+        run: python bot.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Save seen deals
+        run: |
+          git config user.name "deal-bot"
+          git config user.email "deal-bot@users.noreply.github.com"
+          git add seen.json
+          git diff --cached --quiet || (git commit -m "update seen deals" && git push)

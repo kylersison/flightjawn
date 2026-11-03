@@ -235,23 +235,58 @@ def classify(title: str, summary: str = "", today: date | None = None) -> dict |
 
 # ------------------------------------------------------------------- feeds --
 
+FEED_LINK_RX = re.compile(
+    rb"<link\b[^>]*type=[\"']application/(?:rss|atom)\+xml[\"'][^>]*>", re.I)
+HREF_RX = re.compile(rb"href=[\"']([^\"']+)[\"']", re.I)
+
+
+def _get(url: str):
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    resp.raise_for_status()
+    return resp
+
+
+def _discover_feeds(page: bytes) -> list[str]:
+    """Feed URLs a web page advertises with <link rel="alternate" type="application/rss+xml">."""
+    urls = []
+    for tag in FEED_LINK_RX.findall(page[:200_000]):
+        if (m := HREF_RX.search(tag)) and b"comments" not in m.group(1).lower():
+            urls.append(html.unescape(m.group(1).decode("utf-8", "replace")))
+    return urls
+
+
 def fetch_feed(name: str, url: str) -> list:
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-        resp.raise_for_status()
+        resp = _get(url)
     except requests.RequestException as exc:
         print(f"[warn] {name}: could not fetch feed ({exc})", file=sys.stderr)
         return []
     parsed = feedparser.parse(resp.content)
-    if not parsed.entries and (parsed.bozo or not parsed.version):
-        # Say what came back instead, e.g. a "Just a moment..." bot-check page.
-        page_title = re.search(rb"<title[^>]*>(.*?)</title>", resp.content[:5000], re.I | re.S)
-        what = strip_html(page_title.group(1).decode("utf-8", "replace"))[:80] if page_title else ""
-        print(f"[warn] {name}: response wasn't a readable RSS feed "
-              f"(HTTP {resp.status_code}, {resp.headers.get('Content-Type', '?')}, "
-              f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})",
-              file=sys.stderr)
-    return parsed.entries
+    if parsed.entries or not (parsed.bozo or not parsed.version):
+        return parsed.entries
+
+    # Got a web page instead of a feed: follow the feed link the page lists.
+    for feed_url in _discover_feeds(resp.content):
+        if feed_url.rstrip("/") == url.rstrip("/"):
+            continue
+        try:
+            alt = feedparser.parse(_get(feed_url).content)
+        except requests.RequestException:
+            continue
+        if alt.entries:
+            print(f"[warn] {name}: {url} isn't a feed any more; using {feed_url} instead. "
+                  f"Update FEEDS in config.py to that URL.", file=sys.stderr)
+            return alt.entries
+
+    # Say what came back instead, e.g. a "Just a moment..." bot-check page.
+    page_title = re.search(rb"<title[^>]*>(.*?)</title>", resp.content[:5000], re.I | re.S)
+    what = strip_html(page_title.group(1).decode("utf-8", "replace"))[:80] if page_title else ""
+    redirected = f", redirected to {resp.url}" if resp.url.rstrip("/") != url.rstrip("/") else ""
+    print(f"[warn] {name}: response wasn't a readable RSS feed "
+          f"(HTTP {resp.status_code}{redirected}, {resp.headers.get('Content-Type', '?')}, "
+          f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})",
+          file=sys.stderr)
+    return []
 
 
 def entry_key(entry) -> str:

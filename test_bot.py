@@ -1,5 +1,9 @@
 """Run with:  python -m pytest -q   (or just: python test_bot.py)"""
-from bot import build_message, classify, find_booking_links, google_flights_url
+from datetime import date
+
+from bot import build_message, classify, find_booking_links, format_months, google_flights_url, travel_months
+
+NOV = date(2026, 11, 2)
 
 
 def tier(title, summary=""):
@@ -93,6 +97,60 @@ def test_alert_always_has_book_link():
     msg = build_message(entry, "Test", classify(entry["title"]))
     book = next(f for f in msg["embeds"][0]["fields"] if "Book" in f["name"])
     assert "google.com/travel/flights" in book["value"] and "Tokyo" in book["value"]
+
+
+def months(text):
+    return travel_months(text, NOV)
+
+
+def test_month_range_across_new_year():
+    assert months("Travel dates: December 2026 – March 2027") == [(2026, 12), (2027, 1), (2027, 2), (2027, 3)]
+
+
+def test_month_range_without_years():
+    assert months("Availability: Jan - Mar") == [(2027, 1), (2027, 2), (2027, 3)]
+    assert months("Various dates between December and February") == [(2026, 12), (2027, 1), (2027, 2)]
+
+
+def test_month_list_and_specific_dates():
+    assert months("Sample dates: Dec 3 – Dec 10, Jun 5 2027") == [(2026, 12), (2027, 6)]
+
+
+def test_may_the_verb_is_ignored():
+    assert months("You may want to book fast. Travel in April") == [(2027, 4)]
+
+
+def test_booking_deadline_is_not_a_travel_date():
+    assert months("Book by December 5. Travel March – April") == [(2027, 3), (2027, 4)]
+
+
+def test_format_months():
+    assert format_months([(2026, 12), (2027, 1), (2027, 6)]) == "Dec 2026 – Jan 2027, Jun 2027"
+
+
+def test_winter_break_deal_kept():
+    info = classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
+                    "<p>Travel dates: December – January</p>", NOV)
+    assert info["tier"] == "great" and info["months"] == [(2026, 12), (2027, 1)]
+
+
+def test_spring_only_deal_skipped():
+    assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
+                    "<p>Travel dates: February – May 2027</p>", NOV) is None
+
+
+def test_deal_overlapping_summer_kept():
+    assert classify("Los Angeles to Osaka, Japan for only $520 USD roundtrip",
+                    "<p>Availability: March – July 2027</p>", NOV)["tier"] == "great"
+
+
+def test_november_only_deal_skipped():
+    assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
+                    "<p>Travel November 2026</p>", NOV) is None
+
+
+def test_no_dates_still_posts():
+    assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip", "", NOV)["months"] == []
 
 
 if __name__ == "__main__":

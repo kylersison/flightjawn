@@ -32,6 +32,17 @@ COUNTRY_WORDS = ["japan"]
 GREAT_PRICE = {"roundtrip": 550, "oneway": 325}
 MAX_PRICE = {"roundtrip": 750, "oneway": 450}
 
+# When you can travel. Deals whose posts only list months outside these
+# windows are skipped. Format: ("YYYY-MM", "YYYY-MM"), both ends included;
+# use None for "and anytime after". Use an empty list [] to turn the filter off.
+TRAVEL_WINDOWS = [
+    ("2026-12", "2027-01"),  # winter break: December – January
+    ("2027-06", None),       # June onward
+]
+
+# Post deals whose post doesn't list any travel months we could read.
+ALERT_IF_NO_DATES = True
+
 # Post deals even when no USD price could be read from the title.
 ALERT_IF_NO_PRICE = True
 

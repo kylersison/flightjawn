@@ -18,7 +18,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -52,8 +52,114 @@ def strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
-def classify(title: str, summary: str = "") -> dict | None:
-    """Return alert details if this post is a deal we care about, else None."""
+# ------------------------------------------------------------ travel dates --
+
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"]
+MONTH_NUM = {}
+for _i, _name in enumerate(MONTH_NAMES, 1):
+    MONTH_NUM[_name.lower()] = _i
+    MONTH_NUM[_name[:3].lower()] = _i
+MONTH_NUM["sept"] = 9
+_month_words = sorted(MONTH_NUM, key=len, reverse=True)
+# Capitalized or ALL CAPS only, so "you may want to book" isn't read as May.
+MONTH_RX = re.compile(
+    r"\b(" + "|".join(w.capitalize() + "|" + w.upper() for w in _month_words) + r")\b\.?"
+    r"(?:\s+\d{1,2}(?:st|nd|rd|th)?\b)?,?(?:\s+(20\d\d)\b)?"
+)
+RANGE_GAP_RX = re.compile(r"^\s*(?:-|–|—|to|through|thru|until|till)\s*$", re.I)
+# Months right after these are deadlines or post dates, not travel dates.
+NOT_TRAVEL_RX = re.compile(
+    r"(book(?:ed)?\s+(?:by|before)|sale\s+ends|ends|expires?|valid\s+until|"
+    r"posted|updated|published)\s*(?:on\s*)?$", re.I)
+
+
+def _year_for(month: int, today: date) -> int:
+    """A month with no year means its next occurrence (this month counts)."""
+    return today.year if month >= today.month else today.year + 1
+
+
+def travel_months(text: str, today: date | None = None) -> list[tuple[int, int]]:
+    """Every (year, month) a post says you can travel in, sorted.
+
+    Understands "December 2026", "Dec 3", "Jan – Mar 2027", "between
+    December and March", and lists like "Dec, Jan, Jun". Months with no year
+    are assumed to be the next time that month comes around.
+    """
+    today = today or date.today()
+    hits = []
+    for m in MONTH_RX.finditer(text):
+        if NOT_TRAVEL_RX.search(text[max(0, m.start() - 25):m.start()]):
+            continue
+        hits.append((m.start(), m.end(), MONTH_NUM[m.group(1).lower()],
+                     int(m.group(2)) if m.group(2) else None))
+
+    months: set[tuple[int, int]] = set()
+    i = 0
+    while i < len(hits):
+        _, end, mon, yr = hits[i]
+        if i + 1 < len(hits):
+            nstart, _, nmon, nyr = hits[i + 1]
+            gap = text[end:nstart]
+            is_range = RANGE_GAP_RX.match(gap) or (
+                gap.strip().lower() == "and"
+                and text[max(0, hits[i][0] - 9):hits[i][0]].lower().strip().endswith("between"))
+            if is_range:
+                if yr is None and nyr is not None:
+                    yr = nyr if mon <= nmon else nyr - 1
+                yr = yr or _year_for(mon, today)
+                nyr = nyr or (yr if nmon >= mon else yr + 1)
+                y, mo = yr, mon
+                for _ in range(24):  # walk the range month by month
+                    months.add((y, mo))
+                    if (y, mo) >= (nyr, nmon):
+                        break
+                    y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+                i += 2
+                continue
+        months.add((yr or _year_for(mon, today), mon))
+        i += 1
+    return sorted(months)
+
+
+def _ym(text: str | None) -> tuple[int, int] | None:
+    if not text:
+        return None
+    y, m = text.split("-")
+    return int(y), int(m)
+
+
+WINDOWS = [(_ym(a), _ym(b)) for a, b in config.TRAVEL_WINDOWS]
+
+
+def in_travel_window(months: list[tuple[int, int]]) -> bool:
+    if not WINDOWS:
+        return True
+    return any(start <= ym and (end is None or ym <= end)
+               for ym in months for start, end in WINDOWS)
+
+
+def format_months(months: list[tuple[int, int]]) -> str:
+    """[(2026,12),(2027,1),(2027,6)] -> "Dec 2026 – Jan 2027, Jun 2027"."""
+    def label(ym):
+        return f"{MONTH_NAMES[ym[1] - 1][:3]} {ym[0]}"
+    runs: list[list[tuple[int, int]]] = []
+    for ym in months:
+        if runs:
+            py, pm = runs[-1][-1]
+            if ym == ((py + 1, 1) if pm == 12 else (py, pm + 1)):
+                runs[-1].append(ym)
+                continue
+        runs.append([ym])
+    return ", ".join(label(r[0]) if len(r) == 1 else f"{label(r[0])} – {label(r[-1])}" for r in runs)
+
+
+def classify(title: str, summary: str = "", today: date | None = None) -> dict | None:
+    """Return alert details if this post is a deal we care about, else None.
+
+    `summary` can be the post's full HTML; it's used for the destination,
+    origin, error-fare wording and travel dates.
+    """
     title = strip_html(title)
     summary = strip_html(summary)
 
@@ -104,7 +210,14 @@ def classify(title: str, summary: str = "") -> dict | None:
     else:
         return None
 
-    return {"tier": tier, "price": price, "trip": trip, "dests": dests}
+    # 5. Travel dates: skip deals that only cover months you can't go.
+    months = travel_months(title + " . " + summary, today)
+    if months and not in_travel_window(months):
+        return None
+    if not months and not config.ALERT_IF_NO_DATES:
+        return None
+
+    return {"tier": tier, "price": price, "trip": trip, "dests": dests, "months": months}
 
 
 # ------------------------------------------------------------------- feeds --
@@ -239,6 +352,9 @@ def build_message(entry, source: str, info: dict) -> dict:
             {"name": "Route", "value": "LAX → " + ", ".join(info["dests"]), "inline": True},
             {"name": "Price", "value": price, "inline": True},
             {"name": "Source", "value": source, "inline": True},
+            {"name": "🗓️ Travel dates",
+             "value": format_months(info["months"]) if info.get("months") else "Not listed, check the post",
+             "inline": False},
             booking_field(entry, info),
         ],
         "footer": {"text": "Double-check on Google Flights before booking"},
@@ -303,10 +419,12 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
             key = entry_key(entry)
             if not dry_run and key in seen:
                 continue
-            info = classify(entry.get("title", ""), entry.get("summary", ""))
+            info = classify(entry.get("title", ""), entry_html(entry))
             if info:
                 matched += 1
                 label = f"[{info['tier']}] {strip_html(entry.get('title', ''))}"
+                if info["months"]:
+                    label += f"  ({format_months(info['months'])})"
                 if dry_run:
                     print("  would post:", label)
                 elif first_run and not post_existing:
@@ -330,11 +448,12 @@ def send_test(webhook: str) -> None:
     entry = {
         "title": "TEST: Los Angeles to Osaka, Japan for only $300 USD roundtrip (error fare)",
         "link": "https://www.google.com/travel/flights",
-        "summary": "This is a test alert from your Japan fare bot. If you can read this, the webhook works!",
+        "summary": "This is a test alert from your Japan fare bot. If you can read this, the webhook works! "
+                   "Travel dates: December 2026 – January 2027.",
         "content": [{"value": '<a href="https://www.google.com/travel/flights?q=Flights%20from%20LAX%20to%20KIX">'
                               'Google Flights</a>'}],
     }
-    info = classify(entry["title"], entry["summary"])
+    info = classify(entry["title"], entry["summary"], today=date(2026, 11, 1))
     post_to_discord(webhook, build_message(entry, "Test", info))
     print("Test alert sent. Check your Discord channel.")
 

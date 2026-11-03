@@ -1,5 +1,5 @@
 """Run with:  python -m pytest -q   (or just: python test_bot.py)"""
-from bot import classify
+from bot import build_message, classify, find_booking_links, google_flights_url
 
 
 def tier(title, summary=""):
@@ -66,6 +66,33 @@ def test_foreign_currency_is_not_read_as_usd():
 
 def test_expired_deal_is_skipped():
     assert tier("[FARE GONE] Alaska Air: Seattle / Los Angeles – Tokyo / Osaka, Japan. Starting $195. Roundtrip") is None
+
+
+def test_booking_links_from_post():
+    entry = {"summary": (
+        '<p>Dates: <a href="https://www.google.com/travel/flights?tfs=abc&amp;curr=USD">Mar 3</a>, '
+        '<a href="https://www.google.com/travel/flights?tfs=def">Mar 10</a> '
+        '<a href="https://twitter.com/share?u=x">Tweet</a> '
+        '<a href="https://www.skyscanner.com/transport/flights/lax/kix/">Skyscanner</a> '
+        '<a href="https://www.secretflying.com/go/123">GO TO DEAL</a></p>')}
+    links = find_booking_links(entry)
+    assert links == [
+        ("Google Flights", "https://www.google.com/travel/flights?tfs=abc&curr=USD"),
+        ("Skyscanner", "https://www.skyscanner.com/transport/flights/lax/kix/"),
+        ("Book on deal site", "https://www.secretflying.com/go/123"),
+    ]
+
+
+def test_google_flights_fallback_url():
+    assert google_flights_url("KIX", "oneway") == (
+        "https://www.google.com/travel/flights?q=Flights%20from%20LAX%20to%20KIX%20one%20way&curr=USD&hl=en")
+
+
+def test_alert_always_has_book_link():
+    entry = {"title": "Los Angeles to Tokyo, Japan for only $499 USD roundtrip", "link": "https://example.com/post"}
+    msg = build_message(entry, "Test", classify(entry["title"]))
+    book = next(f for f in msg["embeds"][0]["fields"] if "Book" in f["name"])
+    assert "google.com/travel/flights" in book["value"] and "Tokyo" in book["value"]
 
 
 if __name__ == "__main__":

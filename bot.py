@@ -20,6 +20,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 import feedparser
 import requests
@@ -132,6 +133,85 @@ def entry_time(entry) -> str | None:
     return datetime(*t[:6], tzinfo=timezone.utc).isoformat()
 
 
+# ----------------------------------------------------------------- booking --
+
+# Sites a deal post might link to for actually buying the ticket. Matched
+# against the link's host; first match wins.
+BOOKING_SITES = [
+    ("google.com/travel/flights", "Google Flights"),
+    ("google.com/flights", "Google Flights"),
+    ("matrix.itasoftware.com", "ITA Matrix"),
+    ("skyscanner.", "Skyscanner"),
+    ("kayak.", "Kayak"),
+    ("momondo.", "momondo"),
+    ("expedia.", "Expedia"),
+    ("priceline.", "Priceline"),
+    ("cheapoair.", "CheapOair"),
+    ("kiwi.com", "Kiwi.com"),
+    ("trip.com", "Trip.com"),
+    ("united.com", "United"),
+    ("delta.com", "Delta"),
+    ("aa.com", "American"),
+    ("alaskaair.com", "Alaska"),
+    ("ana.co.jp", "ANA"),
+    ("jal.co.jp", "JAL"),
+    ("zipair.net", "ZIPAIR"),
+    ("singaporeair.com", "Singapore Airlines"),
+    ("koreanair.com", "Korean Air"),
+    ("evaair.com", "EVA Air"),
+    ("china-airlines.com", "China Airlines"),
+    ("philippineairlines.com", "Philippine Airlines"),
+]
+# Links on the deal site itself that are booking buttons ("GO TO DEAL").
+BOOKING_TEXT_RX = re.compile(r"\b(go to deal|book( now| here| it)?|view deal|search flights)\b", re.I)
+LINK_RX = re.compile(r"<a\s[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+MAX_BOOKING_LINKS = 3
+
+
+def entry_html(entry) -> str:
+    parts = [c.get("value", "") for c in entry.get("content", []) or []]
+    parts.append(entry.get("summary", ""))
+    return " ".join(parts)
+
+
+def find_booking_links(entry) -> list[tuple[str, str]]:
+    """Booking links (label, url) found in the deal post's text, best first."""
+    found: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for href, text in LINK_RX.findall(entry_html(entry)):
+        url = html.unescape(href).strip()
+        if not url.startswith(("http://", "https://")) or url in seen_urls:
+            continue
+        where = urlparse(url).netloc.lower() + urlparse(url).path.lower()
+        label = next((name for key, name in BOOKING_SITES if key in where), None)
+        if label is None and BOOKING_TEXT_RX.search(strip_html(text)):
+            label = "Book on deal site"
+        if label:
+            seen_urls.add(url)
+            found.append((label, url))
+    # Several links to the same site (e.g. one per date) → keep the first.
+    by_label: dict[str, str] = {}
+    for label, url in found:
+        by_label.setdefault(label, url)
+    return list(by_label.items())[:MAX_BOOKING_LINKS]
+
+
+def google_flights_url(dest: str, trip: str) -> str:
+    """A Google Flights search for LAX → dest (always works as a fallback)."""
+    q = f"Flights from LAX to {dest}" + (" one way" if trip == "oneway" else "")
+    return f"https://www.google.com/travel/flights?q={quote(q)}&curr=USD&hl=en"
+
+
+def booking_field(entry, info: dict) -> dict:
+    links = [f"[{label}]({url})" for label, url in find_booking_links(entry)]
+    for dest in info["dests"][:2]:
+        links.append(f"[Search Google Flights: LAX → {dest}]({google_flights_url(dest, info['trip'])})")
+    # Discord caps field values at 1024 chars; drop links from the end to fit.
+    while len(" · ".join(links)) > 1024 and len(links) > 1:
+        links.pop()
+    return {"name": "🎟️ Book it", "value": " · ".join(links), "inline": False}
+
+
 # ----------------------------------------------------------------- discord --
 
 STYLE = {
@@ -159,6 +239,7 @@ def build_message(entry, source: str, info: dict) -> dict:
             {"name": "Route", "value": "LAX → " + ", ".join(info["dests"]), "inline": True},
             {"name": "Price", "value": price, "inline": True},
             {"name": "Source", "value": source, "inline": True},
+            booking_field(entry, info),
         ],
         "footer": {"text": "Double-check on Google Flights before booking"},
     }
@@ -250,6 +331,8 @@ def send_test(webhook: str) -> None:
         "title": "TEST: Los Angeles to Osaka, Japan for only $300 USD roundtrip (error fare)",
         "link": "https://www.google.com/travel/flights",
         "summary": "This is a test alert from your Japan fare bot. If you can read this, the webhook works!",
+        "content": [{"value": '<a href="https://www.google.com/travel/flights?q=Flights%20from%20LAX%20to%20KIX">'
+                              'Google Flights</a>'}],
     }
     info = classify(entry["title"], entry["summary"])
     post_to_discord(webhook, build_message(entry, "Test", info))

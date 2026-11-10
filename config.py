@@ -7,13 +7,13 @@ FEEDS = {
 }
 
 # Secret Flying turned off its RSS feeds, so the bot reads these public deal
-# pages instead (newest first). The US list gets ~10 posts a day, so 3 pages
-# cover a couple of days between runs. Error fares get their own page.
+# pages instead (newest first). The US list gets ~10 posts a day (9 per
+# page), so 2 pages cover ~2 days even if a few runs get skipped. Error fares
+# get their own page. Fewer pages = gentler on their site when polling often.
 SECRET_FLYING_PAGES = [
     "https://www.secretflying.com/error-fares/",
     "https://www.secretflying.com/usa-flight-deals/",
     "https://www.secretflying.com/usa-flight-deals/page/2/",
-    "https://www.secretflying.com/usa-flight-deals/page/3/",
 ]
 
 # Where you fly from. Keywords are matched as whole words, case-insensitive.

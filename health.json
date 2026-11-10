@@ -1,0 +1,11 @@
+{
+ "Secret Flying": {
+  "last_problem": "response wasn't a readable RSS feed (HTTP 200, redirected to https://www.secretflying.com/, text/html; charset=UTF-8, 390,539 bytes, page title: 'Secret Flying | Cheap Flights & Error Fare Flight Deals')",
+  "ok": false,
+  "since": "2026-11-10T21:27:45.135753+00:00"
+ },
+ "The Flight Deal (LAX)": {
+  "ok": true,
+  "since": "2026-11-10T21:27:45.135753+00:00"
+ }
+}

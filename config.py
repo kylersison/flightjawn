@@ -3,9 +3,18 @@
 # Deal feeds to watch (RSS). Both are curated deal sites, so most posts are
 # already "good" prices — the bot narrows them to your routes.
 FEEDS = {
-    "Secret Flying": "https://www.secretflying.com/feed/",
     "The Flight Deal (LAX)": "https://www.theflightdeal.com/category/flight-deals/lax/feed/",
 }
+
+# Secret Flying turned off its RSS feeds, so the bot reads these public deal
+# pages instead (newest first). The US list gets ~10 posts a day, so 3 pages
+# cover a couple of days between runs. Error fares get their own page.
+SECRET_FLYING_PAGES = [
+    "https://www.secretflying.com/error-fares/",
+    "https://www.secretflying.com/usa-flight-deals/",
+    "https://www.secretflying.com/usa-flight-deals/page/2/",
+    "https://www.secretflying.com/usa-flight-deals/page/3/",
+]
 
 # Where you fly from. Keywords are matched as whole words, case-insensitive.
 ORIGINS = {

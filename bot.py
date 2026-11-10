@@ -1,6 +1,6 @@
 """Japan fare alert bot.
 
-Polls flight-deal RSS feeds, keeps only LAX -> Tokyo/Osaka deals under your
+Polls flight-deal RSS feeds and Secret Flying's deal pages, keeps only LAX -> Tokyo/Osaka deals under your
 price limits, and posts them to a Discord channel through a webhook.
 
 Usage:
@@ -249,8 +249,9 @@ FEED_LINK_RX = re.compile(
 HREF_RX = re.compile(rb"href=[\"']([^\"']+)[\"']", re.I)
 
 
-def _get(url: str):
-    resp = requests.get(url, headers=FEED_HEADERS, timeout=20)
+def _get(url: str, accept: str | None = None):
+    headers = dict(FEED_HEADERS, **({"Accept": accept} if accept else {}))
+    resp = requests.get(url, headers=headers, timeout=20)
     resp.raise_for_status()
     return resp
 
@@ -298,6 +299,103 @@ def fetch_feed(name: str, url: str) -> tuple[list, str | None]:
                f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})")
     print(f"[warn] {name}: {problem}", file=sys.stderr)
     return [], problem
+
+
+# ------------------------------------------------------ secret flying pages --
+# Secret Flying switched off its RSS feeds and REST API in 2026 (/feed/ now
+# redirects to the home page), so the bot reads its public deal listings
+# instead. Each card's CSS classes carry the site's own tags, including exact
+# routes like "category-los-angeles-usa--tokyo-japan" and "category-error-fare",
+# and dead deals get an EXPIRED stamp, so the listing alone is enough.
+
+ARTICLE_RX = re.compile(r"<article\b([^>]*)>(.*?)</article>", re.I | re.S)
+CLASS_RX = re.compile(r"""class=["']([^"']*)["']""", re.I)
+CARD_TITLE_RX = re.compile(
+    r"""<h3[^>]*entry-title[^>]*>\s*<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""", re.I | re.S)
+CARD_DATE_RX = re.compile(r"<time[^>]*entry-date[^>]*>\s*([^<]+?)\s*</time>", re.I)
+
+
+def _slug_words(slug: str) -> str:
+    return slug.strip("_").replace("-", " ")
+
+
+def parse_secret_flying_cards(page: str) -> list[dict]:
+    """Deal cards on a Secret Flying listing page, as feed-like entries.
+
+    Expired deals and ad slots are left out. Each entry's "content" holds the
+    card's tags in words, e.g. "los angeles usa → tokyo japan / error fare",
+    which is what the matcher reads to find the origin and destinations.
+    """
+    entries = []
+    for attrs, body in ARTICLE_RX.findall(page):
+        title_m = CARD_TITLE_RX.search(body)
+        if not title_m or "expiredStamp" in body:
+            continue
+        cls = CLASS_RX.search(attrs)
+        slugs = [c[len("category-"):] for c in (cls.group(1).split() if cls else [])
+                 if c.startswith("category-")]
+        # Route tags are exact ("X-usa--Y-japan"). When a card has them, keep
+        # only routes from your origin to your destinations, so a post with
+        # LA -> Seoul and New York -> Tokyo doesn't look like LA -> Tokyo.
+        routes = [tuple(map(_slug_words, s.split("--", 1))) for s in slugs if "--" in s]
+        if routes:
+            tags = [f"{a} → {b}" for a, b in routes
+                    if ORIGIN_RX.search(a) and any(rx.search(b) for rx in DEST_RX.values())]
+        else:
+            tags = [_slug_words(s) for s in slugs]
+        if "error-fare" in slugs:
+            tags.append("error fare")
+        link = html.unescape(title_m.group(1)).strip()
+        entry = {
+            "id": link,
+            "link": link,
+            "title": strip_html(title_m.group(2)),
+            "summary": "",
+            "content": [{"value": "Secret Flying tags: " + " / ".join(tags)}],
+        }
+        if (date_m := CARD_DATE_RX.search(body)):
+            try:
+                entry["published_parsed"] = time.strptime(date_m.group(1).strip(), "%b %d, %Y")
+            except ValueError:
+                pass
+        entries.append(entry)
+    return entries
+
+
+def fetch_secret_flying(name: str, urls: list[str]) -> tuple[list, str | None]:
+    """Read every listing page; returns (entries, problem) like fetch_feed."""
+    entries, problems, seen_links = [], [], set()
+    for i, url in enumerate(urls):
+        if i:
+            time.sleep(1)  # robots.txt asks for a 1 s crawl delay
+        try:
+            resp = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+        except requests.RequestException as exc:
+            problems.append(f"{url}: could not fetch ({exc})")
+            continue
+        page = resp.content.decode(resp.encoding or "utf-8", "replace")
+        cards = parse_secret_flying_cards(page)
+        if not cards and "entry-title" not in page:
+            problems.append(f"{url}: no deal cards found (HTTP {resp.status_code}); "
+                            f"the page layout may have changed")
+        for card in cards:
+            if card["link"] not in seen_links:
+                seen_links.add(card["link"])
+                entries.append(card)
+    for p in problems:
+        print(f"[warn] {name}: {p}", file=sys.stderr)
+    # Healthy as long as at least one page gave us deals.
+    problem = "; ".join(problems) if problems and not entries else None
+    return entries, problem
+
+
+def all_sources() -> list:
+    """(name, fetch) pairs; each fetch() returns (entries, problem)."""
+    sources = [(name, (lambda n=name, u=url: fetch_feed(n, u))) for name, url in config.FEEDS.items()]
+    if getattr(config, "SECRET_FLYING_PAGES", None):
+        sources.append(("Secret Flying",
+                        lambda: fetch_secret_flying("Secret Flying", config.SECRET_FLYING_PAGES)))
+    return sources
 
 
 def entry_key(entry) -> str:
@@ -602,9 +700,10 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> bool:
     health = load_health()
     working = 0
 
-    for source, url in config.FEEDS.items():
-        entries, problem = fetch_feed(source, url)
-        print(f"{source}: {len(entries)} posts in feed")
+    sources = all_sources()
+    for source, fetch in sources:
+        entries, problem = fetch()
+        print(f"{source}: {len(entries)} posts")
         if problem:
             gh_annotation("warning", f"{source} feed unreadable", problem)
         else:
@@ -651,7 +750,7 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> bool:
     save_health(health)
     if first_run and not post_existing:
         print("First run: remembered current posts; only new deals will be posted from now on.")
-    print(f"Done: {posted} posted, {matched} matched, {working}/{len(config.FEEDS)} feeds readable.")
+    print(f"Done: {posted} posted, {matched} matched, {working}/{len(sources)} sources readable.")
     if working == 0:
         gh_annotation("error", "No feeds readable", "Every deal feed failed this run; see the warnings above.")
     return working > 0

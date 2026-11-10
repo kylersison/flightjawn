@@ -226,3 +226,52 @@ def test_health_alerts_when_feed_never_worked():
     health = {}
     msg = update_health(health, "Feed", "HTTP 403", T1)
     assert msg and "isn't working" in msg["embeds"][0]["description"]
+
+
+# ---------------------------------------------------- secret flying pages --
+
+from pathlib import Path  # noqa: E402
+
+from bot import entry_html, parse_secret_flying_cards  # noqa: E402
+
+LISTING = (Path(__file__).parent / "fixtures" / "secretflying_listing.html").read_text(encoding="utf-8")
+
+
+def sf_cards():
+    return {c["link"].rstrip("/").rsplit("/", 1)[-1]: c for c in parse_secret_flying_cards(LISTING)}
+
+
+def test_sf_skips_ads_and_expired_deals():
+    cards = sf_cards()
+    assert len(cards) == 3
+    assert "expired-example" not in cards
+
+
+def test_sf_error_fare_to_japan_from_us_cities_is_caught():
+    # The real Nov 2026 error fare: title only says "US cities to Japan",
+    # LAX and Tokyo/Osaka are in the card's route tags.
+    card = sf_cards()["error-fare-us-cities-to-japan-from-only-154-roundtrip"]
+    info = classify(card["title"], entry_html(card), today=NOV)
+    assert info["tier"] == "error"
+    assert info["price"] == 154
+    assert set(info["dests"]) == {"Tokyo", "KIX"}
+    assert card["published_parsed"][:3] == (2026, 11, 1)
+
+
+def test_sf_unrelated_route_is_ignored():
+    card = sf_cards()["los-angeles-san-francisco-vice-versa-86-roundtrip"]
+    assert "&amp;" not in card["title"]
+    assert classify(card["title"], entry_html(card), today=NOV) is None
+
+
+def test_sf_other_city_to_tokyo_doesnt_count_as_lax():
+    card = sf_cards()["mixed-routes-example"]  # LA -> Seoul and New York -> Tokyo
+    assert classify(card["title"], entry_html(card), today=NOV) is None
+
+
+def test_sf_alert_message_builds():
+    card = sf_cards()["error-fare-us-cities-to-japan-from-only-154-roundtrip"]
+    info = classify(card["title"], entry_html(card), today=NOV)
+    msg = build_message(card, "Secret Flying", info)
+    assert msg["content"] == "@everyone"
+    assert msg["embeds"][0]["url"].endswith("-154-roundtrip/")

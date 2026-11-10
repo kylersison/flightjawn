@@ -197,3 +197,32 @@ if __name__ == "__main__":
         t()
     print(f"{len(tests)} tests passed")
     sys.exit(0)
+
+
+# ------------------------------------------------------------ feed health --
+
+from bot import update_health  # noqa: E402
+
+T1, T2, T3 = "2026-11-10T00:00:00+00:00", "2026-11-10T01:00:00+00:00", "2026-11-10T02:00:00+00:00"
+
+
+def test_health_first_working_run_is_quiet():
+    health = {}
+    assert update_health(health, "Feed", None, T1) is None
+    assert health["Feed"]["ok"] is True
+
+
+def test_health_alerts_once_when_feed_breaks_then_recovers():
+    health = {}
+    update_health(health, "Feed", None, T1)
+    broke = update_health(health, "Feed", "HTTP 403", T2)
+    assert broke and "isn't working" in broke["embeds"][0]["description"]
+    assert update_health(health, "Feed", "HTTP 403", T3) is None  # no repeat ping every run
+    fixed = update_health(health, "Feed", None, T3)
+    assert fixed and "working again" in fixed["embeds"][0]["description"]
+
+
+def test_health_alerts_when_feed_never_worked():
+    health = {}
+    msg = update_health(health, "Feed", "HTTP 403", T1)
+    assert msg and "isn't working" in msg["embeds"][0]["description"]

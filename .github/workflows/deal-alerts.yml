@@ -33,9 +33,10 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-      - name: Save seen deals and price history
+      - name: Save seen deals, price history and feed health
+        if: ${{ !cancelled() }} # save even when every feed failed, so health.json is kept
         run: |
           git config user.name "deal-bot"
           git config user.email "deal-bot@users.noreply.github.com"
-          git add seen.json prices.json
+          git add seen.json prices.json health.json
           git diff --cached --quiet || (git commit -m "update seen deals and prices" && git push)

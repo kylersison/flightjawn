@@ -28,7 +28,16 @@ import requests
 import config
 
 SEEN_FILE = Path(__file__).with_name("seen.json")
-USER_AGENT = "japan-fare-bot/1.0 (personal hobby project; polls every 10 min)"
+HEALTH_FILE = Path(__file__).with_name("health.json")
+# Many deal sites (Secret Flying included) sit behind bot protection that
+# rejects unknown user agents like "japan-fare-bot/1.0", so ask like a browser.
+FEED_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+    "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+IN_GITHUB_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
 
 
 # ---------------------------------------------------------------- matching --
@@ -241,7 +250,7 @@ HREF_RX = re.compile(rb"href=[\"']([^\"']+)[\"']", re.I)
 
 
 def _get(url: str):
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    resp = requests.get(url, headers=FEED_HEADERS, timeout=20)
     resp.raise_for_status()
     return resp
 
@@ -255,15 +264,17 @@ def _discover_feeds(page: bytes) -> list[str]:
     return urls
 
 
-def fetch_feed(name: str, url: str) -> list:
+def fetch_feed(name: str, url: str) -> tuple[list, str | None]:
+    """Return (entries, problem). `problem` is None when the feed was read fine."""
     try:
         resp = _get(url)
     except requests.RequestException as exc:
-        print(f"[warn] {name}: could not fetch feed ({exc})", file=sys.stderr)
-        return []
+        problem = f"could not fetch feed ({exc})"
+        print(f"[warn] {name}: {problem}", file=sys.stderr)
+        return [], problem
     parsed = feedparser.parse(resp.content)
     if parsed.entries or not (parsed.bozo or not parsed.version):
-        return parsed.entries
+        return parsed.entries, None
 
     # Got a web page instead of a feed: follow the feed link the page lists.
     for feed_url in _discover_feeds(resp.content):
@@ -276,17 +287,17 @@ def fetch_feed(name: str, url: str) -> list:
         if alt.entries:
             print(f"[warn] {name}: {url} isn't a feed any more; using {feed_url} instead. "
                   f"Update FEEDS in config.py to that URL.", file=sys.stderr)
-            return alt.entries
+            return alt.entries, None
 
     # Say what came back instead, e.g. a "Just a moment..." bot-check page.
     page_title = re.search(rb"<title[^>]*>(.*?)</title>", resp.content[:5000], re.I | re.S)
     what = strip_html(page_title.group(1).decode("utf-8", "replace"))[:80] if page_title else ""
     redirected = f", redirected to {resp.url}" if resp.url.rstrip("/") != url.rstrip("/") else ""
-    print(f"[warn] {name}: response wasn't a readable RSS feed "
-          f"(HTTP {resp.status_code}{redirected}, {resp.headers.get('Content-Type', '?')}, "
-          f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})",
-          file=sys.stderr)
-    return []
+    problem = (f"response wasn't a readable RSS feed "
+               f"(HTTP {resp.status_code}{redirected}, {resp.headers.get('Content-Type', '?')}, "
+               f"{len(resp.content):,} bytes{', page title: ' + repr(what) if what else ''})")
+    print(f"[warn] {name}: {problem}", file=sys.stderr)
+    return [], problem
 
 
 def entry_key(entry) -> str:
@@ -511,6 +522,53 @@ def post_to_discord(webhook: str, payload: dict) -> None:
     raise RuntimeError("Discord kept rate-limiting the webhook")
 
 
+# ------------------------------------------------------------ feed health --
+# A blocked feed used to fail silently (green run, no alerts, ever). Now the
+# bot remembers which feeds work and posts to Discord when one breaks or
+# recovers, and the GitHub run shows a warning.
+
+def load_health() -> dict:
+    try:
+        return json.loads(HEALTH_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_health(health: dict) -> None:
+    HEALTH_FILE.write_text(json.dumps(health, indent=1, sort_keys=True) + "\n")
+
+
+def health_message(source: str, problem: str | None, since: str | None) -> dict:
+    if problem:
+        text = (f"⚠️ **{source} feed isn't working**, so deals from it are being missed.\n"
+                f"`{problem[:300]}`\nThe bot keeps checking and will say when it recovers.")
+        color = 0xFDD835
+    else:
+        text = f"✅ **{source} feed is working again**" + (f" (broken since {since[:10]})." if since else ".")
+        color = 0x43A047
+    return {"username": config.BOT_NAME, "allowed_mentions": {"parse": []},
+            "embeds": [{"description": text, "color": color}]}
+
+
+def update_health(health: dict, source: str, problem: str | None, now: str) -> dict | None:
+    """Record this run's result for a feed; return a Discord message if it changed."""
+    prev = health.get(source)  # None (never checked) or {"ok": bool, "since": iso}
+    ok = problem is None
+    if prev is not None and prev.get("ok") == ok:
+        if not ok:
+            prev["last_problem"] = problem
+        return None
+    health[source] = {"ok": ok, "since": now, **({"last_problem": problem} if problem else {})}
+    if prev is None and ok:
+        return None  # first time we've seen it, and it works: nothing to say
+    return health_message(source, problem, prev.get("since") if prev else None)
+
+
+def gh_annotation(level: str, title: str, message: str) -> None:
+    if IN_GITHUB_ACTIONS:
+        print(f"::{level} title={title}::{message}")
+
+
 # -------------------------------------------------------------------- seen --
 
 def load_seen() -> dict | None:
@@ -531,7 +589,8 @@ def save_seen(seen: dict) -> None:
 
 # --------------------------------------------------------------------- run --
 
-def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
+def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> bool:
+    """Check every feed once. Returns False if no feed could be read at all."""
     seen = load_seen()
     first_run = seen is None
     seen = seen or {}
@@ -540,10 +599,20 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
     posted = matched = 0
     prices = load_prices()
     known_prices = {r["key"] for r in prices}
+    health = load_health()
+    working = 0
 
     for source, url in config.FEEDS.items():
-        entries = fetch_feed(source, url)
+        entries, problem = fetch_feed(source, url)
         print(f"{source}: {len(entries)} posts in feed")
+        if problem:
+            gh_annotation("warning", f"{source} feed unreadable", problem)
+        else:
+            working += 1
+        if not dry_run:
+            notice = update_health(health, source, problem, now)
+            if notice:
+                post_to_discord(webhook, notice)
         for entry in entries:
             key = entry_key(entry)
             body = entry_html(entry)
@@ -576,12 +645,16 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> None:
 
     if dry_run:
         print(f"Dry run: {matched} matching deal(s); nothing posted or saved.")
-        return
+        return working > 0
     save_seen(seen)
     save_prices(prices)
+    save_health(health)
     if first_run and not post_existing:
         print("First run: remembered current posts; only new deals will be posted from now on.")
-    print(f"Done: {posted} posted.")
+    print(f"Done: {posted} posted, {matched} matched, {working}/{len(config.FEEDS)} feeds readable.")
+    if working == 0:
+        gh_annotation("error", "No feeds readable", "Every deal feed failed this run; see the warnings above.")
+    return working > 0
 
 
 def send_test(webhook: str) -> None:
@@ -638,12 +711,15 @@ def main() -> None:
         return
     while True:
         try:
-            run_once(webhook, args.dry_run, args.post_existing)
+            any_feed_ok = run_once(webhook, args.dry_run, args.post_existing)
         except Exception as exc:  # keep the loop alive through one bad run
             if not args.loop:
                 raise
             print(f"[error] {exc}", file=sys.stderr)
+            any_feed_ok = True
         if not args.loop:
+            if not any_feed_ok:
+                sys.exit(1)  # red X in GitHub Actions (and an email) instead of a fake green
             break
         time.sleep(args.loop * 60)
 

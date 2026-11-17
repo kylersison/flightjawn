@@ -4,7 +4,8 @@
   "since": "2026-11-16T15:20:17.896265+00:00"
  },
  "The Flight Deal (LAX)": {
-  "ok": true,
-  "since": "2026-11-12T21:10:18.912026+00:00"
+  "last_problem": "could not fetch feed (HTTPSConnectionPool(host='www.theflightdeal.com', port=443): Read timed out. (read timeout=20))",
+  "ok": false,
+  "since": "2026-11-17T22:10:19.417729+00:00"
  }
 }

@@ -1,8 +1,7 @@
 {
  "Secret Flying": {
-  "last_problem": "https://www.secretflying.com/error-fares/: could not fetch (503 Server Error: Service Unavailable for url: https://www.secretflying.com/error-fares/); https://www.secretflying.com/usa-flight-deals/: could not fetch (503 Server Error: Service Unavailable for url: https://www.secretflying.com/usa-flight-deals/); https://www.secretflying.com/usa-flight-deals/page/2/: could not fetch (503 Server Error: Service Unavailable for url: https://www.secretflying.com/usa-flight-deals/page/2/)",
-  "ok": false,
-  "since": "2026-11-18T20:40:19.865066+00:00"
+  "ok": true,
+  "since": "2026-11-18T20:50:17.616124+00:00"
  },
  "The Flight Deal (LAX)": {
   "ok": true,

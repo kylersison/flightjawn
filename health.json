@@ -4,7 +4,8 @@
   "since": "2026-11-18T20:50:17.616124+00:00"
  },
  "The Flight Deal (LAX)": {
-  "ok": true,
-  "since": "2026-11-18T20:10:19.910326+00:00"
+  "last_problem": "could not fetch feed (403 Client Error: Forbidden for url: https://www.theflightdeal.com/category/flight-deals/lax/feed/)",
+  "ok": false,
+  "since": "2026-11-20T05:40:19.015182+00:00"
  }
 }

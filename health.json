@@ -1,7 +1,8 @@
 {
  "Secret Flying": {
-  "ok": true,
-  "since": "2026-11-27T17:00:25.614413+00:00"
+  "last_problem": "https://www.secretflying.com/error-fares/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20)); https://www.secretflying.com/usa-flight-deals/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20)); https://www.secretflying.com/usa-flight-deals/page/2/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20))",
+  "ok": false,
+  "since": "2026-11-27T17:10:18.390315+00:00"
  },
  "The Flight Deal (LAX)": {
   "ok": true,

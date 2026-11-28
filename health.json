@@ -1,6 +1,6 @@
 {
  "Secret Flying": {
-  "last_problem": "https://www.secretflying.com/error-fares/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20)); https://www.secretflying.com/usa-flight-deals/: could not fetch (522 Server Error: <none> for url: https://www.secretflying.com/usa-flight-deals/); https://www.secretflying.com/usa-flight-deals/page/2/: could not fetch (522 Server Error: <none> for url: https://www.secretflying.com/usa-flight-deals/page/2/)",
+  "last_problem": "https://www.secretflying.com/error-fares/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20)); https://www.secretflying.com/usa-flight-deals/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20)); https://www.secretflying.com/usa-flight-deals/page/2/: could not fetch (HTTPSConnectionPool(host='www.secretflying.com', port=443): Read timed out. (read timeout=20))",
   "ok": false,
   "since": "2026-11-28T03:30:21.766903+00:00"
  },

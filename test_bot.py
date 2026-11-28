@@ -136,7 +136,17 @@ def test_winter_break_deal_kept():
 
 def test_spring_only_deal_skipped():
     assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
-                    "<p>Travel dates: February – May 2027</p>", NOV) is None
+                    "<p>Travel dates: February – April 2027</p>", NOV) is None
+
+
+def test_late_may_deal_counts():
+    assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
+                    "<p>Travel dates: May 20 – June 10, 2027</p>", NOV)["tier"] == "great"
+
+
+def test_2028_only_deal_skipped():
+    assert classify("Los Angeles to Tokyo, Japan for only $499 USD roundtrip",
+                    "<p>Travel dates: January – March 2028</p>", NOV) is None
 
 
 def test_deal_overlapping_summer_kept():
@@ -329,8 +339,9 @@ TICKET = {  # shape of a real prices_for_dates result
 
 
 def test_price_check_months_follow_travel_windows():
-    assert price_check_months(date(2026, 11, 27)) == ["2026-12", "2027-01", "2027-06", "2027-07",
-                                                       "2027-08", "2027-09"]
+    assert price_check_months(date(2026, 11, 27)) == [
+        "2026-12", "2027-01", "2027-05", "2027-06", "2027-07", "2027-08",
+        "2027-09", "2027-10", "2027-11", "2027-12"]
 
 
 def test_aviasales_result_becomes_a_normal_alert():

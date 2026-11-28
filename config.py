@@ -50,7 +50,7 @@ MAX_PRICE = {"roundtrip": 750, "oneway": 450}
 # use None for "and anytime after". Use an empty list [] to turn the filter off.
 TRAVEL_WINDOWS = [
     ("2026-12", "2027-01"),  # winter break: December – January
-    ("2027-06", None),       # June onward
+    ("2027-05", "2027-12"),  # late May through the end of 2027 (filter is by month, so all of May counts)
 ]
 
 # Post deals whose post doesn't list any travel months we could read.
@@ -86,7 +86,7 @@ PRICE_CHECK_ROUTES = [  # (origin airport, Aviasales city code, name)
     ("LAX", "TYO", "Tokyo"),
     ("LAX", "OSA", "Osaka"),
 ]
-PRICE_CHECK_MAX_MONTHS = 6
+PRICE_CHECK_MAX_MONTHS = 10  # covers every month in TRAVEL_WINDOWS above
 PRICE_CHECK_EVERY_MINUTES = 60   # it's 48-hour cached data, no need to ask more often
 PRICE_CHECK_ALERT_AT = 550       # post a fare only at or under this (round trip, USD)
 

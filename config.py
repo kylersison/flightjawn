@@ -4,6 +4,10 @@
 # already "good" prices — the bot narrows them to your routes.
 FEEDS = {
     "The Flight Deal (LAX)": "https://www.theflightdeal.com/category/flight-deals/lax/feed/",
+    # Mixed travel deals (hotels, cruises too); the matcher keeps LAX -> Japan.
+    "Travel Pirates": "https://www.travelpirates.com/feed",
+    # NY-focused, but famous for nationwide error fares.
+    "Dan's Deals (airfare)": "https://www.dansdeals.com/category/airfare-deals/feed/",
 }
 
 # Secret Flying turned off its RSS feeds, so the bot reads these public deal
@@ -74,6 +78,24 @@ ERROR_FARE_MENTION = "@everyone"
 # and each alert says how it compares ("$80 above the best in 12 months").
 PRICE_MEMORY_DAYS = 365   # how far back "the best" looks
 PRICE_RECENT_DAYS = 60    # for the "lowest in 60 days" badge
+
+# Direct fare check (Aviasales / Travelpayouts Data API). Turned on by adding
+# a TRAVELPAYOUTS_TOKEN secret on GitHub (README step 4). Each check makes one
+# request per route per month, for the next few months in TRAVEL_WINDOWS.
+PRICE_CHECK_ROUTES = [  # (origin airport, Aviasales city code, name)
+    ("LAX", "TYO", "Tokyo"),
+    ("LAX", "OSA", "Osaka"),
+]
+PRICE_CHECK_MAX_MONTHS = 6
+PRICE_CHECK_EVERY_MINUTES = 60   # it's 48-hour cached data, no need to ask more often
+PRICE_CHECK_ALERT_AT = 550       # post a fare only at or under this (round trip, USD)
+
+# Only warn in Discord when a source has been failing this long. Short blips
+# (a timeout, a busy server) fix themselves within a run or two.
+FEED_ALERT_AFTER_MINUTES = 30
+
+# Ignore posts older than this (a newly added feed's back catalog, mostly).
+MAX_POST_AGE_DAYS = 4
 
 # Forget deals older than this so seen.json stays small.
 SEEN_RETENTION_DAYS = 60

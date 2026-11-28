@@ -1,6 +1,7 @@
 """Japan fare alert bot.
 
-Polls flight-deal RSS feeds and Secret Flying's deal pages, keeps only LAX -> Tokyo/Osaka deals under your
+Polls flight-deal RSS feeds, Secret Flying's deal pages and (optionally)
+Aviasales fare data, keeps only LAX -> Tokyo/Osaka deals under your
 price limits, and posts them to a Discord channel through a webhook.
 
 Usage:
@@ -189,12 +190,22 @@ def parse_route(title: str, summary: str = "") -> dict | None:
     elif not ORIGIN_RX.search(summary):
         return None
 
-    # 3. Price and trip type (from the title only; bodies list many cities).
+    # 3. Price and trip type, from the title. Bodies list many cities, so a
+    #    body price only counts when the title has none and the price is in
+    #    the same sentence as your origin ("...from Los Angeles ... from $464").
     price = None
+    trip = "oneway" if ONEWAY_RX.search(title) else "roundtrip"
     if not FOREIGN_CURRENCY_RX.search(title):
         prices = [int(p.replace(",", "")) for p in PRICE_RX.findall(title)]
         price = min(prices) if prices else None
-    trip = "oneway" if ONEWAY_RX.search(title) else "roundtrip"
+        if price is None:
+            for sentence in re.split(r"(?<=[.!?])\s+", summary):
+                m = PRICE_RX.search(sentence)
+                if m and ORIGIN_RX.search(sentence) and not FOREIGN_CURRENCY_RX.search(sentence):
+                    price = int(m.group(1).replace(",", ""))
+                    if ONEWAY_RX.search(sentence):
+                        trip = "oneway"
+                    break
     return {"dests": dests, "price": price, "trip": trip}
 
 
@@ -249,11 +260,24 @@ FEED_LINK_RX = re.compile(
 HREF_RX = re.compile(rb"href=[\"']([^\"']+)[\"']", re.I)
 
 
-def _get(url: str, accept: str | None = None):
-    headers = dict(FEED_HEADERS, **({"Accept": accept} if accept else {}))
-    resp = requests.get(url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    return resp
+# Overloaded sites (Cloudflare 52x, 503, timeouts) usually recover within
+# seconds, so try again once before calling the source broken.
+RETRY_STATUSES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+
+
+def _get(url: str, accept: str | None = None, attempts: int = 2, **kwargs):
+    headers = dict(FEED_HEADERS, **({"Accept": accept} if accept else {}), **kwargs.pop("headers", {}))
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=(6, 15), **kwargs)
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == attempts:
+                raise
+        else:
+            if resp.status_code not in RETRY_STATUSES or attempt == attempts:
+                resp.raise_for_status()
+                return resp
+        time.sleep(4 * attempt)
 
 
 def _discover_feeds(page: bytes) -> list[str]:
@@ -372,7 +396,7 @@ def fetch_secret_flying(name: str, urls: list[str]) -> tuple[list, str | None]:
             resp = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
         except requests.RequestException as exc:
             problems.append(f"{url}: could not fetch ({exc})")
-            continue
+            break  # the site is struggling; don't pile more requests on it
         page = resp.content.decode(resp.encoding or "utf-8", "replace")
         cards = parse_secret_flying_cards(page)
         if not cards and "entry-title" not in page:
@@ -389,12 +413,101 @@ def fetch_secret_flying(name: str, urls: list[str]) -> tuple[list, str | None]:
     return entries, problem
 
 
-def all_sources() -> list:
+# ------------------------------------------------------- aviasales prices --
+# Deal blogs only post what their editors notice. This checks real fares
+# directly: Aviasales (via the free Travelpayouts Data API) returns the
+# cheapest LAX -> Tokyo/Osaka tickets other travelers found in the last
+# 48 hours, per month. Only fares at or under PRICE_CHECK_ALERT_AT are posted.
+# Needs a TRAVELPAYOUTS_TOKEN secret; without one this source is skipped.
+
+AVIASALES_API = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
+PRICE_CHECK_SOURCE = "Aviasales price check"
+
+
+def price_check_months(today: date | None = None) -> list[str]:
+    """The next months ("YYYY-MM") inside your travel windows, soonest first."""
+    today = today or date.today()
+    y, m = today.year, today.month
+    months = []
+    for _ in range(18):
+        if in_travel_window([(y, m)]):
+            months.append(f"{y}-{m:02d}")
+        if len(months) >= config.PRICE_CHECK_MAX_MONTHS:
+            break
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return months
+
+
+def _fmt_day(iso: str) -> str:
+    d = datetime.fromisoformat(iso)
+    return f"{d:%b} {d.day}, {d.year}"
+
+
+def aviasales_entry(ticket: dict, origin: str, dest_name: str, month: str) -> dict:
+    """Turn one API result into a feed-like entry the normal matcher understands."""
+    price = int(round(float(ticket["price"])))
+    dest_code = ticket.get("destination_airport") or ticket.get("destination") or ""
+    stops = ticket.get("transfers")
+    stops_txt = "nonstop" if stops == 0 else (f"{stops} stop{'s' if stops != 1 else ''}" if stops is not None else "")
+    dates = _fmt_day(ticket["departure_at"]) + (f" – {_fmt_day(ticket['return_at'])}" if ticket.get("return_at") else "")
+    trip = "roundtrip" if ticket.get("return_at") else "one-way"
+    link = "https://www.aviasales.com" + ticket["link"] if ticket.get("link") else None
+    airline = ticket.get("airline", "")
+    return {
+        # A lower price for the same month is a new key, so it alerts again.
+        "id": f"aviasales:{origin}-{dest_name}:{month}:{price}",
+        "link": link or google_flights_url(dest_name, "roundtrip"),
+        "title": f"Los Angeles ({origin}) to {dest_name} ({dest_code}), Japan for ${price} {trip} · {dates}",
+        "summary": (f"Cheapest {dest_name} fare for {month} in Aviasales search data: "
+                    f"{' · '.join(x for x in [airline, stops_txt] if x)}. "
+                    f"Found by travelers in the last 48 hours, so the price may have moved."),
+        "content": [{"value": f'<a href="{link}">Search flights on Aviasales</a>'}] if link else [],
+    }
+
+
+def fetch_aviasales(token: str, health: dict, now: datetime) -> tuple[list, str | None]:
+    state = health.setdefault("_price_check", {})
+    last = state.get("last_checked")
+    if last and now - datetime.fromisoformat(last) < timedelta(minutes=config.PRICE_CHECK_EVERY_MINUTES):
+        return [], None  # checked recently; this is cached data anyway
+    entries, problems, tried = [], [], 0
+    for origin, dest, dest_name in config.PRICE_CHECK_ROUTES:
+        for month in price_check_months(now.date()):
+            tried += 1
+            params = {"origin": origin, "destination": dest, "departure_at": month,
+                      "one_way": "false", "sorting": "price", "limit": 1,
+                      "currency": "usd", "market": "us"}
+            try:
+                resp = _get(AVIASALES_API, accept="application/json", params=params,
+                            headers={"X-Access-Token": token})
+                data = resp.json().get("data") or []
+            except requests.HTTPError as exc:
+                code = exc.response.status_code if exc.response is not None else "?"
+                hint = " (check the TRAVELPAYOUTS_TOKEN secret)" if code in (401, 403) else ""
+                return entries, f"API answered HTTP {code}{hint}"
+            except (requests.RequestException, ValueError) as exc:
+                problems.append(f"{dest} {month}: {exc}")
+                continue
+            if data and float(data[0].get("price", 1e9)) <= config.PRICE_CHECK_ALERT_AT:
+                entries.append(aviasales_entry(data[0], origin, dest_name, month))
+    if len(problems) < tried:
+        state["last_checked"] = now.isoformat()  # all failed: try again next run
+    for p in problems:
+        print(f"[warn] {PRICE_CHECK_SOURCE}: {p}", file=sys.stderr)
+    # Broken only if every request failed.
+    return entries, ("; ".join(problems)[:300] if tried and len(problems) == tried else None)
+
+
+def all_sources(health: dict | None = None, now: datetime | None = None) -> list:
     """(name, fetch) pairs; each fetch() returns (entries, problem)."""
     sources = [(name, (lambda n=name, u=url: fetch_feed(n, u))) for name, url in config.FEEDS.items()]
     if getattr(config, "SECRET_FLYING_PAGES", None):
         sources.append(("Secret Flying",
                         lambda: fetch_secret_flying("Secret Flying", config.SECRET_FLYING_PAGES)))
+    token = os.environ.get("TRAVELPAYOUTS_TOKEN", "").strip()
+    if token and health is not None:
+        sources.append((PRICE_CHECK_SOURCE,
+                        lambda: fetch_aviasales(token, health, now or datetime.now(timezone.utc))))
     return sources
 
 
@@ -494,6 +607,7 @@ BOOKING_SITES = [
     ("priceline.", "Priceline"),
     ("cheapoair.", "CheapOair"),
     ("kiwi.com", "Kiwi.com"),
+    ("aviasales.", "Aviasales"),
     ("trip.com", "Trip.com"),
     ("united.com", "United"),
     ("delta.com", "Delta"),
@@ -638,7 +752,8 @@ def save_health(health: dict) -> None:
 
 def health_message(source: str, problem: str | None, since: str | None) -> dict:
     if problem:
-        text = (f"⚠️ **{source} feed isn't working**, so deals from it are being missed.\n"
+        text = (f"⚠️ **{source} feed isn't working** (failing for "
+                f"{config.FEED_ALERT_AFTER_MINUTES}+ minutes), so deals from it are being missed.\n"
                 f"`{problem[:300]}`\nThe bot keeps checking and will say when it recovers.")
         color = 0xFDD835
     else:
@@ -649,17 +764,27 @@ def health_message(source: str, problem: str | None, since: str | None) -> dict:
 
 
 def update_health(health: dict, source: str, problem: str | None, now: str) -> dict | None:
-    """Record this run's result for a feed; return a Discord message if it changed."""
-    prev = health.get(source)  # None (never checked) or {"ok": bool, "since": iso}
-    ok = problem is None
-    if prev is not None and prev.get("ok") == ok:
-        if not ok:
-            prev["last_problem"] = problem
+    """Record this run's result for a source; return a Discord message if worth one.
+
+    Sites hiccup all the time (a timeout here, a 503 there) and recover on the
+    next run, so a source only counts as broken once it has failed for
+    FEED_ALERT_AFTER_MINUTES straight. A recovery is only announced if the
+    breakage was.
+    """
+    prev = health.get(source)  # {"ok": bool, "since": iso, "alerted": bool, ...}
+    if problem is None:
+        health[source] = {"ok": True, "since": now if not (prev and prev["ok"]) else prev["since"]}
+        if prev and not prev["ok"] and prev.get("alerted", True):  # old files: assume alerted
+            return health_message(source, None, prev["since"])
         return None
-    health[source] = {"ok": ok, "since": now, **({"last_problem": problem} if problem else {})}
-    if prev is None and ok:
-        return None  # first time we've seen it, and it works: nothing to say
-    return health_message(source, problem, prev.get("since") if prev else None)
+    if not prev or prev["ok"]:
+        prev = health[source] = {"ok": False, "since": now, "alerted": False}
+    prev["last_problem"] = problem
+    failing_for = datetime.fromisoformat(now) - datetime.fromisoformat(prev["since"])
+    if not prev.get("alerted", True) and failing_for >= timedelta(minutes=config.FEED_ALERT_AFTER_MINUTES):
+        prev["alerted"] = True
+        return health_message(source, problem, prev["since"])
+    return None
 
 
 def gh_annotation(level: str, title: str, message: str) -> None:
@@ -700,7 +825,8 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> bool:
     health = load_health()
     working = 0
 
-    sources = all_sources()
+    sources = all_sources(health, now_dt)
+    max_age = timedelta(days=config.MAX_POST_AGE_DAYS)
     for source, fetch in sources:
         entries, problem = fetch()
         print(f"{source}: {len(entries)} posts")
@@ -718,6 +844,11 @@ def run_once(webhook: str | None, dry_run: bool, post_existing: bool) -> bool:
             route = parse_route(entry.get("title", ""), body)
             if not dry_run and key in seen:
                 record_price(prices, known_prices, key, entry, route, now_dt)
+                continue
+            # Skip stale posts (e.g. a newly added feed's back catalog).
+            posted_at = entry_time(entry)
+            if posted_at and now_dt - datetime.fromisoformat(posted_at) > max_age:
+                seen[key] = now
                 continue
             info = classify(entry.get("title", ""), body)
             if info and info["price"] is not None:

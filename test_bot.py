@@ -203,29 +203,48 @@ if __name__ == "__main__":
 
 from bot import update_health  # noqa: E402
 
-T1, T2, T3 = "2026-11-10T00:00:00+00:00", "2026-11-10T01:00:00+00:00", "2026-11-10T02:00:00+00:00"
+def at(minutes):
+    return (datetime(2026, 11, 27, tzinfo=timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
 
 def test_health_first_working_run_is_quiet():
     health = {}
-    assert update_health(health, "Feed", None, T1) is None
+    assert update_health(health, "Feed", None, at(0)) is None
     assert health["Feed"]["ok"] is True
 
 
-def test_health_alerts_once_when_feed_breaks_then_recovers():
+def test_health_short_blip_stays_quiet():
+    # One timeout, back on the next run: no ⚠️ and no ✅.
     health = {}
-    update_health(health, "Feed", None, T1)
-    broke = update_health(health, "Feed", "HTTP 403", T2)
+    update_health(health, "Feed", None, at(0))
+    assert update_health(health, "Feed", "Read timed out", at(10)) is None
+    assert update_health(health, "Feed", None, at(20)) is None
+    assert health["Feed"]["ok"] is True
+
+
+def test_health_alerts_once_after_30_minutes_then_recovers():
+    health = {}
+    update_health(health, "Feed", None, at(0))
+    assert update_health(health, "Feed", "HTTP 403", at(10)) is None
+    assert update_health(health, "Feed", "HTTP 403", at(20)) is None
+    broke = update_health(health, "Feed", "HTTP 403", at(40))
     assert broke and "isn't working" in broke["embeds"][0]["description"]
-    assert update_health(health, "Feed", "HTTP 403", T3) is None  # no repeat ping every run
-    fixed = update_health(health, "Feed", None, T3)
+    assert update_health(health, "Feed", "HTTP 403", at(50)) is None  # no repeat ping every run
+    fixed = update_health(health, "Feed", None, at(60))
     assert fixed and "working again" in fixed["embeds"][0]["description"]
 
 
 def test_health_alerts_when_feed_never_worked():
     health = {}
-    msg = update_health(health, "Feed", "HTTP 403", T1)
+    assert update_health(health, "Feed", "HTTP 403", at(0)) is None
+    msg = update_health(health, "Feed", "HTTP 403", at(30))
     assert msg and "isn't working" in msg["embeds"][0]["description"]
+
+
+def test_health_old_file_without_alerted_flag_still_announces_recovery():
+    health = {"Feed": {"ok": False, "since": at(0), "last_problem": "x"}}  # written by the old bot
+    msg = update_health(health, "Feed", None, at(10))
+    assert msg and "working again" in msg["embeds"][0]["description"]
 
 
 # ---------------------------------------------------- secret flying pages --
@@ -275,3 +294,52 @@ def test_sf_alert_message_builds():
     msg = build_message(card, "Secret Flying", info)
     assert msg["content"] == "@everyone"
     assert msg["embeds"][0]["url"].endswith("-154-roundtrip/")
+
+
+# ------------------------------------------------------ price in the body --
+
+def test_travel_pirates_style_post_reads_price_from_body():
+    # Real Travel Pirates post, Nov 27 2026: no price or origin in the title.
+    title = "Toky-OMG! Affordable Japan Flights 🌸🎌"
+    body = ("Are you looking for an excuse to travel to ? We've found incredible prices on nonstop "
+            "flights to Tokyo with Zipair flights from Los Angeles, San Francisco, & Vancouver starting "
+            "from $464 round-trip. Other departure cities start from $877 round-trip. Prices for this "
+            "destination fluctuate a lot, so be sure to book while they are still available.")
+    info = classify(title, body, today=NOV)
+    assert info["tier"] == "great" and info["price"] == 464 and info["dests"] == ["Tokyo"]
+
+
+def test_body_price_ignored_when_not_next_to_origin():
+    title = "Cheap Japan Flights"
+    body = "Flights to Tokyo from Chicago from $399 round-trip. Los Angeles departures also on sale."
+    info = classify(title, body, today=NOV)
+    assert info["price"] is None and info["tier"] == "deal"
+
+
+# ------------------------------------------------------- aviasales prices --
+
+from bot import aviasales_entry, price_check_months  # noqa: E402
+
+TICKET = {  # shape of a real prices_for_dates result
+    "origin": "LAX", "destination": "TYO", "origin_airport": "LAX", "destination_airport": "NRT",
+    "price": 452, "airline": "ZG", "flight_number": "21", "departure_at": "2026-12-14T23:50:00-08:00",
+    "return_at": "2026-12-28T17:00:00+09:00", "transfers": 0, "return_transfers": 0,
+    "link": "/search/LAX1412NRT28121?t=ZG17657...&search_date=27112026",
+}
+
+
+def test_price_check_months_follow_travel_windows():
+    assert price_check_months(date(2026, 11, 27)) == ["2026-12", "2027-01", "2027-06", "2027-07",
+                                                       "2027-08", "2027-09"]
+
+
+def test_aviasales_result_becomes_a_normal_alert():
+    entry = aviasales_entry(TICKET, "LAX", "Tokyo", "2026-12")
+    info = classify(entry["title"], entry_html(entry), today=NOV)
+    assert info["tier"] == "great" and info["price"] == 452
+    assert set(info["dests"]) == {"NRT", "Tokyo"}
+    assert info["months"] == [(2026, 12)]
+    assert entry["link"].startswith("https://www.aviasales.com/search/LAX1412NRT28121")
+    assert entry["id"] == "aviasales:LAX-Tokyo:2026-12:452"
+    msg = build_message(entry, "Aviasales price check", info)
+    assert "Aviasales" in msg["embeds"][0]["fields"][-1]["value"]

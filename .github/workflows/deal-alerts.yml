@@ -17,7 +17,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v5
 
@@ -32,6 +32,7 @@ jobs:
         run: python bot.py
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }} # optional: turns on the Aviasales price check
 
       - name: Save seen deals, price history and feed health
         if: ${{ !cancelled() }} # save even when every feed failed, so health.json is kept

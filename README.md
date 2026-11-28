@@ -72,6 +72,19 @@ A few notes on the schedule:
 **Prefer to run it on your own machine instead?**
 Use `python bot.py --loop 10`, which checks every 10 minutes until you stop it.
 
+### 4. (Optional) Turn on the direct fare check
+
+Besides deal blogs, the bot can check real LAX → Tokyo/Osaka fares itself,
+using Aviasales search data through the free Travelpayouts Data API. It posts
+a fare only when it's at or under `PRICE_CHECK_ALERT_AT` in `config.py`.
+
+1. Sign up at [travelpayouts.com](https://www.travelpayouts.com) (free) and copy
+   your **API token** from your profile.
+2. In your GitHub repo: **Settings → Secrets and variables → Actions → New
+   repository secret**, name it `TRAVELPAYOUTS_TOKEN`, paste the token.
+
+Without the secret, this check is simply skipped.
+
 ## Customizing
 
 All the settings are in `config.py`:
